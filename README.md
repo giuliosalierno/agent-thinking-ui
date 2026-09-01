@@ -1,9 +1,7 @@
 # agent-thoughts-test
 
 A test agent that streams deterministic **agent thoughts** ("Show thinking")
-to reproduce the My Google / Gemini Enterprise UI behaviour described in
-go/unified-ai:agent-thoughts — but on the Python ADK stack (the design doc's
-`ToolThoughtGenerator` / `BoqletModule` examples are Java/Boqlet).
+to reproduce the  Gemini Enterprise UI behaviour on the Python ADK stack.
 
 Agent generated with `agents-cli` version `1.2.0`
 
