@@ -22,9 +22,12 @@ from google.adk.a2a.converters.part_converter import convert_genai_part_to_a2a_p
 
 from app.thoughts import (
     DEFAULT_LABEL,
+    SEARCH_CALL_ID,
     build_thought_stream,
     extract_thinking_label,
     final_event,
+    function_call_event,
+    function_response_event,
     select_scenario,
     steps_for,
     thought_event,
@@ -76,7 +79,45 @@ def test_latest_block_wins() -> None:
     assert extract_thinking_label(stream) == "Checking the weather..."
 
 
+def test_function_call_and_response_serialize_as_tool_parts() -> None:
+    """A call/response pair must serialize as the A2A tool DataParts the UI
+    turns into a chip (+ "✓"), keyed on the built-in ``google_search`` name."""
+    call = function_call_event(
+        "root_agent", "google_search", {"query": "x"}, call_id="c1"
+    )
+    call_a2a = convert_genai_part_to_a2a_part(call.content.parts[0])
+    assert call_a2a.root.metadata.get("adk_type") == "function_call"
+    assert call_a2a.root.data["name"] == "google_search"
+
+    resp = function_response_event(
+        "root_agent", "google_search", {"ok": True}, call_id="c1"
+    )
+    resp_a2a = convert_genai_part_to_a2a_part(resp.content.parts[0])
+    assert resp_a2a.root.metadata.get("adk_type") == "function_response"
+    # Shared id is what correlates the response with its call.
+    assert call.content.parts[0].function_call.id == "c1"
+    assert resp.content.parts[0].function_response.id == "c1"
+
+
+def test_search_scenario_shape() -> None:
+    """The search scenario emits: preamble, a labelled thought, a matched
+    google_search call/response pair, then the final answer."""
+    steps = steps_for("give info to the Gemini Enterprise roadmap")
+    kinds = [k for k, _ in steps]
+    assert kinds == ["final", "thought", "call", "response", "final"]
+
+    # The thought's first line is what the UI shows as the collapsed label.
+    label = next(p for k, p in steps if k == "thought")
+    assert extract_thinking_label(label) == "Search Gemini Roadmap"
+
+    call = next(p for k, p in steps if k == "call")
+    resp = next(p for k, p in steps if k == "response")
+    assert call["name"] == resp["name"] == "google_search"
+    assert call["id"] == resp["id"] == SEARCH_CALL_ID
+
+
 def test_scenario_routing() -> None:
+    assert select_scenario("give info to the Gemini Enterprise roadmap") == "search"
     assert select_scenario("show my role profile") == "profile"
     assert select_scenario("list holidays") == "holiday"
     assert select_scenario("bad block example") == "bad"

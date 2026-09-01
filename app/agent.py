@@ -39,7 +39,13 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.apps import App
 from google.adk.events import Event
 
-from app.thoughts import final_event, steps_for, thought_event
+from app.thoughts import (
+    final_event,
+    function_call_event,
+    function_response_event,
+    steps_for,
+    thought_event,
+)
 
 # Artificial delay between streamed steps so a human can read each thought block
 # as it appears in the UI. Tune per deploy without a code change via
@@ -68,15 +74,37 @@ class ThoughtStreamingAgent(BaseAgent):
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
         query = _last_user_text(ctx)
-        for i, (kind, text) in enumerate(steps_for(query)):
+        for i, (kind, payload) in enumerate(steps_for(query)):
             # Pause before each step (except the first) so the UI reveals the
-            # thought blocks one at a time at a human-readable pace.
-            if i > 0 and STEP_DELAY_SECONDS > 0:
-                await asyncio.sleep(STEP_DELAY_SECONDS)
+            # thought blocks one at a time at a human-readable pace. A step may
+            # override the pause (e.g. the tool response paces the call->response
+            # gap the UI reports as latency, "(905ms)").
+            if i > 0:
+                delay = payload.get("delay") if isinstance(payload, dict) else None
+                if delay is None:
+                    delay = STEP_DELAY_SECONDS
+                if delay > 0:
+                    await asyncio.sleep(delay)
             if kind == "thought":
-                yield thought_event(self.name, text, ctx.invocation_id)
-            else:
-                yield final_event(self.name, text, ctx.invocation_id)
+                yield thought_event(self.name, payload, ctx.invocation_id)
+            elif kind == "call":
+                yield function_call_event(
+                    self.name,
+                    payload["name"],
+                    payload["args"],
+                    ctx.invocation_id,
+                    payload["id"],
+                )
+            elif kind == "response":
+                yield function_response_event(
+                    self.name,
+                    payload["name"],
+                    payload["response"],
+                    ctx.invocation_id,
+                    payload["id"],
+                )
+            else:  # "final"
+                yield final_event(self.name, payload, ctx.invocation_id)
 
 
 root_agent = ThoughtStreamingAgent(name="root_agent")

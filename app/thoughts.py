@@ -123,10 +123,90 @@ def final_event(author: str, text: str, invocation_id: str = "") -> Event:
     )
 
 
-# --- Scenarios -------------------------------------------------------------
-# A Step is ("thought" | "final", text). Each "thought" step is one block.
+def function_call_event(
+    author: str,
+    name: str,
+    args: dict,
+    invocation_id: str = "",
+    call_id: str = "",
+) -> Event:
+    """Build a tool-*call* Event (a ``function_call`` part).
 
-Step = tuple[str, str]
+    This is what makes the UI render a *tool chip* (icon + name) rather than a
+    thought line. ADK's A2A layer serializes a ``function_call`` part as a
+    DataPart tagged ``adk_type: function_call`` (see
+    ``google.adk.a2a.converters.part_converter``), which the My Google / Gemini
+    Enterprise UI turns into the chip. Using the built-in tool name
+    ``"google_search"`` is what selects the branded Google Search chip + logo.
+
+    Mirrors the call event ADK's own LLM flow emits: ``role="model"``, author =
+    the agent. ``call_id`` must match the id on the paired response so the UI
+    (and any session service) can correlate the call with its result — and so
+    the response can flip the chip to its completed "✓" state.
+    """
+    return Event(
+        invocation_id=invocation_id,
+        author=author,
+        content=types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id=call_id or None, name=name, args=args
+                    )
+                )
+            ],
+        ),
+    )
+
+
+def function_response_event(
+    author: str,
+    name: str,
+    response: dict,
+    invocation_id: str = "",
+    call_id: str = "",
+) -> Event:
+    """Build a tool-*response* Event (a ``function_response`` part).
+
+    This flips the tool chip to its completed ("✓") state. The UI measures the
+    tool latency shown next to the collapsed label (e.g. "(905ms)") from the
+    wall-clock gap between the call event and this response event — so pacing
+    that gap in the agent controls the number the UI displays.
+
+    Mirrors the response event ADK's own LLM flow emits: ``role="user"`` (the
+    tool result is fed back as the user turn), author = the agent, and the same
+    ``call_id`` as the paired call.
+    """
+    return Event(
+        invocation_id=invocation_id,
+        author=author,
+        content=types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id=call_id or None, name=name, response=response
+                    )
+                )
+            ],
+        ),
+    )
+
+
+# --- Scenarios -------------------------------------------------------------
+# A Step is (kind, payload):
+#   - kind "thought" | "final": payload is the block/answer text (a str).
+#   - kind "call": payload is {"name", "args", "id"} -> a function_call part.
+#   - kind "response": payload is {"name", "response", "id"} and may carry an
+#     optional "delay" (seconds) that overrides the inter-step pause, so the UI
+#     shows a realistic tool latency (e.g. "(905ms)") next to the label.
+# Each "thought" step is one block.
+
+Step = tuple[str, object]
+
+# Shared id correlating the search call with its response (and the ✓ state).
+SEARCH_CALL_ID = "call_google_search_1"
 
 
 def _weather_lookup(query: str) -> dict[str, str]:
@@ -213,18 +293,79 @@ def long_line_scenario(_query: str) -> list[Step]:
     ]
 
 
+def search_scenario(_query: str) -> list[Step]:
+    """Reproduce the Gemini Enterprise "Google Search" tool-chip behaviour.
+
+    This is the one scenario that emits real *tool* events (not just thought
+    text), because the collapsed section with a branded "Google Search" chip +
+    "✓" + "(905ms)" latency is rendered from a function call/response pair, not
+    from ``thought=True`` parts. Event sequence (what the UI keys on):
+
+      1. answer text -> the black preamble shown above the thinking group
+                        ("I am going to search ...").
+      2. thought     -> "Search Gemini Roadmap": its first line becomes the
+                        collapsed section label (the UI appends "(905ms)").
+      3. function_call  name="google_search" -> the branded Google Search chip.
+      4. function_response name="google_search" -> flips the chip to "✓"; the
+                        ~0.905s pace of this step is what the UI reports as the
+                        tool latency.
+      5. answer text -> the final grounded answer (streams below the group).
+    """
+    query = "Gemini Enterprise roadmap"
+    results = {
+        "results": [
+            {
+                "title": "Gemini Enterprise roadmap",
+                "snippet": (
+                    "The latest Gemini Enterprise roadmap updates and "
+                    "upcoming milestones."
+                ),
+            }
+        ]
+    }
+    return [
+        (
+            "final",
+            "I am going to search for the Gemini Enterprise roadmap to find "
+            "the latest updates.",
+        ),
+        ("thought", "Search Gemini Roadmap"),
+        (
+            "call",
+            {"name": "google_search", "args": {"query": query}, "id": SEARCH_CALL_ID},
+        ),
+        (
+            "response",
+            {
+                "name": "google_search",
+                "response": results,
+                "id": SEARCH_CALL_ID,
+                # Paced so the UI's call->response gap reads as ~"(905ms)".
+                "delay": 0.905,
+            },
+        ),
+        (
+            "final",
+            "Here are the latest updates from the Gemini Enterprise roadmap.",
+        ),
+    ]
+
+
 SCENARIOS: dict[str, Callable[[str], list[Step]]] = {
     "weather": weather_scenario,
     "profile": profile_scenario,
     "holiday": holiday_scenario,
     "bad": bad_block_scenario,
     "long": long_line_scenario,
+    "search": search_scenario,
 }
 
 
 def select_scenario(query: str) -> str:
     """Pick a scenario from the user's message (keyword routing)."""
     q = query.lower()
+    if "roadmap" in q or "search" in q or "google" in q:
+        return "search"
     if "profile" in q or "role" in q:
         return "profile"
     if "holiday" in q:
